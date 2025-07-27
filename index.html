@@ -78,17 +78,17 @@ h1 {
   </header>
   <div id="controls">
     <label for="radius">Radius (km):</label>
-    <input type="number" id="radius" value="5" min="1" step="1" style="width:60px">
+    <input type="number" id="radius" autocomplete="off" value="5" min="1" step="1" style="width:60px">
     <label for="date_from">From year:</label>
-    <input type="number" id="date_from" placeholder="1900" style="width:80px">
+    <input type="number" id="date_from" autocomplete="off" placeholder="1900" style="width:80px">
     <label for="date_to">To year:</label>
-    <input type="number" id="date_to" placeholder="2025" style="width:80px">
+    <input type="number" id="date_to" autocomplete="off" placeholder="2025" style="width:80px">
     <label for="keyword">Keyword:</label>
-    <input type="text" id="keyword" placeholder="Architect, style…" style="width:120px">
+    <input type="text" id="keyword" autocomplete="off" placeholder="Architect, style…" style="width:120px">
     <button style="background:#333;color:#ccc;border:1px solid #555;padding:4px 8px;" onclick="search()">Search</button>
     
     <label for="address" style="margin-top:0.5rem">Search near address:</label>
-    <input type="text" id="address" placeholder="Enter city or address" style="width:200px">
+    <input type="text" id="address" autocomplete="off" placeholder="Enter city or address" style="width:200px">
     <button style="background:#333;color:#ccc;border:1px solid #555;padding:4px 8px;" onclick="geocodeAddress()">Go</button>
   </div>
   <div id="map"></div>
@@ -96,8 +96,14 @@ h1 {
     // Google Maps API key used for both map and geocoding. Update this
     // variable if you change the key in the script tag below.
     const apiKey = 'AIzaSyDDLRyAF2vvdjYZuPCD2jko4M9tY125wjg';
-    // Global variables for map and user location
+    // Global variables for map, the draggable "you" marker and user location
+    // `youMarker` will represent the green arrow that users can drag to
+    // update the search center. It is initialized in `initMap` and then
+    // reused whenever the center of the map changes. Storing it at the
+    // module scope allows other functions (such as `geocodeAddress`) to
+    // reposition the marker rather than creating a new one.
     let map;
+    let youMarker;
     let userLat = null;
     let userLng = null;
     let markers = [];
@@ -110,6 +116,7 @@ h1 {
      */
     function initMap() {
       function createMap(lat, lng) {
+  console.log('Creating map at:', lat, lng);
         userLat = lat;
         userLng = lng;
         map = new google.maps.Map(document.getElementById('map'), {
@@ -117,30 +124,35 @@ h1 {
           center: { lat: userLat, lng: userLng },
           zoom: 13
         });
-        const youMarker = new google.maps.Marker({
-      position: { lat: userLat, lng: userLng },
-      map: map,
-      draggable: true,
-      title: 'Drag to change search center',
-      icon: {
-        path: google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
-        scale: 5,
-        fillColor: '#228B22',
-        fillOpacity: 1,
-        strokeWeight: 1,
-        strokeColor: '#1a641a'
-      }
-    });
-    youMarker.addListener('dragend', (e) => {
-      userLat = e.latLng.lat();
-      userLng = e.latLng.lng();
-      map.setCenter({ lat: userLat, lng: userLng });
-      search();
-    });
+        // Create the draggable green arrow marker used to indicate the current
+        // search center. Assign it to the global `youMarker` so it can be
+        // repositioned elsewhere (e.g., when geocoding a new address). When
+        // the marker is dragged to a new location, update the stored
+        // coordinates, recenter the map and perform a new search.
+        youMarker = new google.maps.Marker({
+          position: { lat: userLat, lng: userLng },
+          map: map,
+          draggable: true,
+          title: 'Drag to change search center',
+          icon: {
+            path: google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
+            scale: 5,
+            fillColor: '#228B22',
+            fillOpacity: 1,
+            strokeWeight: 1,
+            strokeColor: '#1a641a'
+          }
+        });
+        youMarker.addListener('dragend', (e) => {
+          userLat = e.latLng.lat();
+          userLng = e.latLng.lng();
+          map.setCenter({ lat: userLat, lng: userLng });
+          search();
+        });
       }
       if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          (position) => {
+        navigator.geolocation.getCurrentPosition((position) => {
+        console.log('Using geolocation');
             console.log("Geolocation success", position.coords.latitude, position.coords.longitude);
             createMap(position.coords.latitude, position.coords.longitude);
           },
@@ -197,18 +209,54 @@ h1 {
         userLng = location.lng;
         // Recenter map to new location
         map.setCenter({ lat: userLat, lng: userLng });
-        // Place a marker to indicate the searched location
-        new google.maps.Marker({
-          position: { lat: userLat, lng: userLng },
-          map: map,
-          label: 'S'
-        });
+        // Reposition the existing green arrow marker to the new location.
+        // If `youMarker` doesn't exist yet (for example, if the map hasn't
+        // finished loading), create it now with the correct icon and drag
+        // behavior. Otherwise, simply update its position.
+        if (youMarker) {
+          youMarker.setPosition({ lat: userLat, lng: userLng });
+        } else {
+          youMarker = new google.maps.Marker({
+            position: { lat: userLat, lng: userLng },
+            map: map,
+            draggable: true,
+            title: 'Drag to change search center',
+            icon: {
+              path: google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
+              scale: 5,
+              fillColor: '#228B22',
+              fillOpacity: 1,
+              strokeWeight: 1,
+              strokeColor: '#1a641a'
+            }
+          });
+          youMarker.addListener('dragend', (e) => {
+            userLat = e.latLng.lat();
+            userLng = e.latLng.lng();
+            map.setCenter({ lat: userLat, lng: userLng });
+            search();
+          });
+        }
         // Perform a search with the new coordinates
         search();
       } catch (error) {
         console.error('Geocoding error:', error);
         alert('An error occurred while geocoding the address.');
       }
+    }
+
+    // Enable pressing Enter in the address input to trigger geocoding.
+    // Without this, users must click the "Go" button after typing a location.
+    // Attaching the event listener here ensures the input exists in the DOM
+    // when the script runs.
+    const addressInput = document.getElementById('address');
+    if (addressInput) {
+      addressInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          geocodeAddress();
+        }
+      });
     }
 
     /**
