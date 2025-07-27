@@ -117,24 +117,35 @@ h1 {
           center: { lat: userLat, lng: userLng },
           zoom: 13
         });
-        new google.maps.Marker({
-          position: { lat: userLat, lng: userLng },
-          map: map,
-          label: 'You'
-        });
+        const youMarker = new google.maps.Marker({
+      position: { lat: userLat, lng: userLng },
+      map: map,
+      label: 'You',
+      draggable: true,
+      title: 'Drag to change search center'
+    });
+    youMarker.addListener('dragend', (e) => {
+      userLat = e.latLng.lat();
+      userLng = e.latLng.lng();
+      map.setCenter({ lat: userLat, lng: userLng });
+      search();
+    });
       }
       if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
           (position) => {
+            console.log("Geolocation success", position.coords.latitude, position.coords.longitude);
             createMap(position.coords.latitude, position.coords.longitude);
           },
           () => {
             // If permission denied or unavailable, use Vancouver as default
+            console.warn("Geolocation failed or denied. Using Vancouver as fallback.");
             createMap(49.2827, -123.1207);
           }
         );
       } else {
-        createMap(49.2827, -123.1207);
+        console.warn("Geolocation failed or denied. Using Vancouver as fallback.");
+            createMap(49.2827, -123.1207);
       }
     }
 
