@@ -120,9 +120,16 @@ h1 {
         const youMarker = new google.maps.Marker({
       position: { lat: userLat, lng: userLng },
       map: map,
-      label: 'You',
       draggable: true,
-      title: 'Drag to change search center'
+      title: 'Drag to change search center',
+      icon: {
+        path: google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
+        scale: 5,
+        fillColor: '#228B22',
+        fillOpacity: 1,
+        strokeWeight: 1,
+        strokeColor: '#1a641a'
+      }
     });
     youMarker.addListener('dragend', (e) => {
       userLat = e.latLng.lat();
