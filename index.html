@@ -1,44 +1,323 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ARCHIMAP</title>
-    <!-- Import Signika font from Google Fonts as an alternative to Bahnschrift -->
-    <link href="https://fonts.googleapis.com/css2?family=Signika:wght@400;600&display=swap" rel="stylesheet">
-    <!-- Leaflet CSS for map rendering -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" integrity="sha256-sA+rfMJodk+70xdY4f1CTzot72xPHCZCmwG6pzTrPbk=" crossorigin=""/>
-    <!-- Our custom stylesheet -->
-    <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ARCHIMAP</title>
+  <link href="https://fonts.googleapis.com/css2?family=Signika:wght@400;600&display=swap" rel="stylesheet">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Signika:wght@400;600&display=swap');
+    
+body {
+  font-family: 'Banschrift', 'Signika', sans-serif;
+  background-color: #121212;
+  color: #cccccc;
+  margin: 0;
+  padding: 0;
+}
+
+    
+
+header {
+  background-color: #1e1e1e;
+  padding: 1rem;
+  border-bottom: 1px solid #333;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+
+    
+
+h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  font-family: Helvetica, sans-serif;
+}
+
+
+    
+#controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem;
+  background-color: #181818;
+  border-bottom: 1px solid #333;
+}
+
+    #controls label {
+      margin-right: 0.5rem;
+      font-weight: bold;
+    }
+    
+#controls input {
+  background-color: #2a2a2a;
+  color: #ccc;
+  border: 1px solid #444;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  margin-right: 0;
+}
+
+    #map {
+      height: calc(100vh - 120px);
+      width: 100%;
+    }
+    .info-window {
+      max-width: 250px;
+    }
+  </style>
 </head>
 <body>
-    <div class="banner">
-        <h1>ARCHIMAP</h1>
-        <p class="description">Explore and filter architectural points of interest.</p>
-    </div>
-    <div class="filter-bar">
-        <div class="control">
-            <label for="radius">Radius (km)</label>
-            <input type="number" id="radius" placeholder="e.g. 5">
-        </div>
-        <div class="control">
-            <label for="date">Date</label>
-            <input type="date" id="date">
-        </div>
-        <div class="control">
-            <label for="keyword">Keyword</label>
-            <input type="text" id="keyword" placeholder="Search keyword">
-        </div>
-        <div class="control">
-            <label for="address">Address</label>
-            <input type="text" id="address" placeholder="Enter address">
-        </div>
-        <button id="searchButton">Search</button>
-    </div>
-    <div id="map"></div>
-    <!-- Leaflet JavaScript library -->
-    <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js" integrity="sha256-omsoMXlX+yRFI4o7YaeN0DNoLUGbhuZ8luMG9uMtMsE=" crossorigin=""></script>
-    <!-- Our custom JavaScript -->
-    <script src="app.js"></script>
+  <header>
+    <h1>ARCHIMAP</h1>
+    <span style="font-size: 0.95rem; color: #aaa; margin: 0;">Explore and filter architectural points of interest.</span>
+  </header>
+  <div id="controls">
+    <label for="radius">Radius (km):</label>
+    <input type="number" id="radius" value="5" min="1" step="1" style="width:60px">
+    <label for="date_from">From year:</label>
+    <input type="number" id="date_from" placeholder="1900" style="width:80px">
+    <label for="date_to">To year:</label>
+    <input type="number" id="date_to" placeholder="2025" style="width:80px">
+    <label for="keyword">Keyword:</label>
+    <input type="text" id="keyword" placeholder="Architect, style…" style="width:120px">
+    <button style="background:#333;color:#ccc;border:1px solid #555;padding:4px 8px;" onclick="search()">Search</button>
+    
+    <label for="address" style="margin-top:0.5rem">Search near address:</label>
+    <input type="text" id="address" placeholder="Enter city or address" style="width:200px">
+    <button style="background:#333;color:#ccc;border:1px solid #555;padding:4px 8px;" onclick="geocodeAddress()">Go</button>
+  </div>
+  <div id="map"></div>
+  <script>
+    // Google Maps API key used for both map and geocoding. Update this
+    // variable if you change the key in the script tag below.
+    const apiKey = 'AIzaSyDDLRyAF2vvdjYZuPCD2jko4M9tY125wjg';
+    // Global variables for map and user location
+    let map;
+    let userLat = null;
+    let userLng = null;
+    let markers = [];
+
+    /**
+     * Initialize the Google Map. This function attempts to determine the
+     * user's geolocation. If geolocation is unavailable or denied, the
+     * map centers on Vancouver, Canada by default. A marker marks the
+     * user's (or default) position.
+     */
+    function initMap() {
+      function createMap(lat, lng) {
+        userLat = lat;
+        userLng = lng;
+        map = new google.maps.Map(document.getElementById('map'), {
+          styles: [{"elementType": "geometry", "stylers": [{"color": "#212121"}]}, {"elementType": "labels.icon", "stylers": [{"visibility": "off"}]}, {"elementType": "labels.text.fill", "stylers": [{"color": "#757575"}]}, {"elementType": "labels.text.stroke", "stylers": [{"color": "#212121"}]}, {"featureType": "administrative", "elementType": "geometry", "stylers": [{"color": "#757575"}]}, {"featureType": "administrative.country", "elementType": "labels.text.fill", "stylers": [{"color": "#9e9e9e"}]}, {"featureType": "administrative.land_parcel", "stylers": [{"visibility": "off"}]}, {"featureType": "administrative.locality", "elementType": "labels.text.fill", "stylers": [{"color": "#bdbdbd"}]}, {"featureType": "poi", "elementType": "labels.text.fill", "stylers": [{"color": "#757575"}]}, {"featureType": "poi.park", "elementType": "geometry", "stylers": [{"color": "#181818"}]}, {"featureType": "poi.park", "elementType": "labels.text.fill", "stylers": [{"color": "#616161"}]}, {"featureType": "poi.park", "elementType": "labels.text.stroke", "stylers": [{"color": "#1b1b1b"}]}, {"featureType": "road", "elementType": "geometry.fill", "stylers": [{"color": "#2c2c2c"}]}, {"featureType": "road", "elementType": "labels.text.fill", "stylers": [{"color": "#8a8a8a"}]}, {"featureType": "road.arterial", "elementType": "geometry", "stylers": [{"color": "#373737"}]}, {"featureType": "road.highway", "elementType": "geometry", "stylers": [{"color": "#3c3c3c"}]}, {"featureType": "road.highway.controlled_access", "elementType": "geometry", "stylers": [{"color": "#4e4e4e"}]}, {"featureType": "road.local", "elementType": "labels.text.fill", "stylers": [{"color": "#616161"}]}, {"featureType": "transit", "elementType": "labels.text.fill", "stylers": [{"color": "#757575"}]}, {"featureType": "water", "elementType": "geometry", "stylers": [{"color": "#000000"}]}, {"featureType": "water", "elementType": "labels.text.fill", "stylers": [{"color": "#3d3d3d"}]}],
+          center: { lat: userLat, lng: userLng },
+          zoom: 13
+        });
+        new google.maps.Marker({
+          position: { lat: userLat, lng: userLng },
+          map: map,
+          label: 'You'
+        });
+      }
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            createMap(position.coords.latitude, position.coords.longitude);
+          },
+          () => {
+            // If permission denied or unavailable, use Vancouver as default
+            createMap(49.2827, -123.1207);
+          }
+        );
+      } else {
+        createMap(49.2827, -123.1207);
+      }
+    }
+
+    /**
+     * Remove all markers from the map and clear the markers array.
+     */
+    function clearMarkers() {
+      for (const m of markers) {
+        m.setMap(null);
+      }
+      markers = [];
+    }
+
+    /**
+     * Geocode an arbitrary address using the Google Geocoding API. When a
+     * user enters an address and clicks "Go", this function queries
+     * Google's geocoder with the provided text. On success, the map
+     * recenters on the resulting coordinates and a search is performed to
+     * update the architectural results. If no results are found or an
+     * error occurs, an alert is shown to the user.
+     */
+    async function geocodeAddress() {
+      const address = document.getElementById('address').value.trim();
+      if (!address) {
+        alert('Please enter an address or location.');
+        return;
+      }
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`;
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error('Geocoding request failed');
+        }
+        const data = await response.json();
+        if (data.status !== 'OK' || !data.results || data.results.length === 0) {
+          alert('No results found for the provided address.');
+          return;
+        }
+        const result = data.results[0];
+        const location = result.geometry.location;
+        userLat = location.lat;
+        userLng = location.lng;
+        // Recenter map to new location
+        map.setCenter({ lat: userLat, lng: userLng });
+        // Place a marker to indicate the searched location
+        new google.maps.Marker({
+          position: { lat: userLat, lng: userLng },
+          map: map,
+          label: 'S'
+        });
+        // Perform a search with the new coordinates
+        search();
+      } catch (error) {
+        console.error('Geocoding error:', error);
+        alert('An error occurred while geocoding the address.');
+      }
+    }
+
+    /**
+     * Perform a geosearch via the Wikipedia API. It requests pages
+     * located within a specified radius of the user's location. The
+     * function then retrieves additional metadata (summary and
+     * inception year) and filters the results according to user
+     * criteria.
+     */
+    async function search() {
+      if (userLat === null || userLng === null) {
+        alert('Map not yet initialized. Please wait.');
+        return;
+      }
+      const radiusKm = parseFloat(document.getElementById('radius').value);
+      const radius = isNaN(radiusKm) ? 5 : radiusKm;
+      const dateFrom = parseInt(document.getElementById('date_from').value);
+      const dateTo = parseInt(document.getElementById('date_to').value);
+      const keyword = document.getElementById('keyword').value.trim().toLowerCase();
+      // Build geosearch URL. The pipe in coordinates must be encoded.
+      const geoUrl = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${encodeURIComponent(userLat + '|' + userLng)}&gsradius=${Math.round(radius * 1000)}&gslimit=50&format=json&origin=*`;
+      try {
+        clearMarkers();
+        const geoResp = await fetch(geoUrl);
+        const geoData = await geoResp.json();
+        const pages = geoData?.query?.geosearch || [];
+        if (pages.length === 0) {
+          alert('No results found within the specified radius.');
+          return;
+        }
+        for (const page of pages) {
+          // Fetch summary for each page
+          const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(page.title)}`;
+          let description = '';
+          let imageUrl = '';
+          try {
+            const summaryResp = await fetch(summaryUrl);
+            if (summaryResp.ok) {
+              const summaryData = await summaryResp.json();
+              description = summaryData.extract || '';
+              if (summaryData.thumbnail && summaryData.thumbnail.source) {
+                imageUrl = summaryData.thumbnail.source;
+              }
+            }
+          } catch (err) {
+            console.warn('Summary fetch failed for', page.title, err);
+          }
+          // Keyword filtering: skip if keyword specified and not present
+          if (keyword) {
+            const contentString = (page.title + ' ' + description).toLowerCase();
+            if (!contentString.includes(keyword)) {
+              continue;
+            }
+          }
+          // Fetch Wikidata item to get inception year (P571)
+          let inceptionYear = null;
+          try {
+            const propsUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(page.title)}&prop=pageprops&format=json&origin=*`;
+            const propsResp = await fetch(propsUrl);
+            if (propsResp.ok) {
+              const propsData = await propsResp.json();
+              const pagesObj = propsData?.query?.pages;
+              const pageId = pagesObj && Object.keys(pagesObj)[0];
+              const wikidataId = pagesObj && pagesObj[pageId]?.pageprops?.wikibase_item;
+              if (wikidataId) {
+                const entityUrl = `https://www.wikidata.org/wiki/Special:EntityData/${wikidataId}.json`;
+                const entityResp = await fetch(entityUrl);
+                if (entityResp.ok) {
+                  const entityData = await entityResp.json();
+                  const entity = entityData?.entities?.[wikidataId];
+                  const p571 = entity?.claims?.P571;
+                  if (p571 && p571.length > 0) {
+                    const timeStr = p571[0].mainsnak.datavalue.value.time;
+                    const match = timeStr.match(/([+-]?\d{4})/);
+                    if (match) {
+                      inceptionYear = parseInt(match[1], 10);
+                    }
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            console.warn('Wikidata fetch failed for', page.title, err);
+          }
+          // Date range filtering: if inceptionYear is available, compare
+          if (!isNaN(dateFrom) && inceptionYear !== null && inceptionYear < dateFrom) {
+            continue;
+          }
+          if (!isNaN(dateTo) && inceptionYear !== null && inceptionYear > dateTo) {
+            continue;
+          }
+          // Create marker on the map
+          const marker = new google.maps.Marker({
+            position: { lat: page.lat, lng: page.lon },
+            map: map,
+            title: page.title
+          });
+          markers.push(marker);
+          // Build content for info window
+          let content = `<div class="info-window"><h3>${page.title}</h3>`;
+          if (inceptionYear) {
+            content += `<p><strong>Year:</strong> ${inceptionYear}</p>`;
+          }
+          if (description) {
+            content += `<p>${description}</p>`;
+          }
+          if (imageUrl) {
+            content += `<img src="${imageUrl}" alt="${page.title}" style="max-width:100%;height:auto;margin-bottom:0.5rem;">`;
+          }
+          content += `<p><a href="https://en.wikipedia.org/wiki/${encodeURIComponent(page.title)}" target="_blank" rel="noopener">Read more on Wikipedia</a></p></div>`;
+          const infoWindow = new google.maps.InfoWindow({ content: content });
+          marker.addListener('click', () => {
+            infoWindow.open(map, marker);
+          });
+        }
+      } catch (err) {
+        console.error('Geosearch error:', err);
+        alert('An error occurred while fetching data. Please try again.');
+      }
+    }
+  </script>
+  <!--
+    Insert your Google Maps API key below. Replace YOUR_API_KEY with your own key.
+    See https://developers.google.com/maps/documentation/javascript/get-api-key
+    for instructions on obtaining a key.
+  -->
+  <!-- Google Maps API key inserted as requested -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDDLRyAF2vvdjYZuPCD2jko4M9tY125wjg&callback=initMap" async defer></script>
 </body>
 </html>
