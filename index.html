@@ -69,13 +69,44 @@ h1 {
     .info-window {
       max-width: 250px;
     }
+
+    /* Styling for the toggle button that shows/hides the search and filter controls
+       on small screens. Hidden by default in the markup, but becomes visible
+       via media queries below. */
+    #toggle-controls {
+      background-color: #333;
+      color: #ccc;
+      border: 1px solid #555;
+      padding: 4px 8px;
+      margin: 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    /* On screens narrower than 600px, hide the controls panel and show the
+       toggle button. On wider screens, show the controls and hide the toggle. */
+    @media (max-width: 600px) {
+      #controls {
+        display: none;
+      }
+      #toggle-controls {
+        display: inline-block;
+      }
+    }
   </style>
 </head>
 <body>
   <header>
     <h1>ARCHIMAP</h1>
-    <span style="font-size: 0.95rem; color: #aaa; margin: 0;">Explore and filter architectural points of interest.</span>
+    <!-- Update the tagline text and decrease its font size as requested -->
+    <span style="font-size: 0.85rem; color: #aaa; margin: 0;">Find Architecture</span>
   </header>
+  <!-- Toggle button to show/hide the search and filter controls on small screens -->
+  <!-- The Filters button toggles the visibility of the controls. It is
+       visible on all screen sizes so users can always collapse or
+       expand the search panel. -->
+  <!-- Toggle button with no label; its icon will be set via JavaScript -->
+  <button id="toggle-controls"></button>
   <div id="controls">
     <label for="radius">Radius (km):</label>
     <input type="number" id="radius" autocomplete="off" value="5" min="1" step="1" style="width:60px">
@@ -96,12 +127,9 @@ h1 {
     // Google Maps API key used for both map and geocoding. Update this
     // variable if you change the key in the script tag below.
     const apiKey = 'AIzaSyDDLRyAF2vvdjYZuPCD2jko4M9tY125wjg';
-    // Global variables for map, the draggable "you" marker and user location
-    // `youMarker` will represent the green arrow that users can drag to
-    // update the search center. It is initialized in `initMap` and then
-    // reused whenever the center of the map changes. Storing it at the
-    // module scope allows other functions (such as `geocodeAddress`) to
-    // reposition the marker rather than creating a new one.
+    // Global variables for map, the draggable "you" marker, user location
+    // and markers. `youMarker` represents the green arrow used to set
+    // the current search center and is reused when the center changes.
     let map;
     let youMarker;
     let userLat = null;
@@ -122,27 +150,29 @@ h1 {
         map = new google.maps.Map(document.getElementById('map'), {
           styles: [{"elementType": "geometry", "stylers": [{"color": "#212121"}]}, {"elementType": "labels.icon", "stylers": [{"visibility": "off"}]}, {"elementType": "labels.text.fill", "stylers": [{"color": "#757575"}]}, {"elementType": "labels.text.stroke", "stylers": [{"color": "#212121"}]}, {"featureType": "administrative", "elementType": "geometry", "stylers": [{"color": "#757575"}]}, {"featureType": "administrative.country", "elementType": "labels.text.fill", "stylers": [{"color": "#9e9e9e"}]}, {"featureType": "administrative.land_parcel", "stylers": [{"visibility": "off"}]}, {"featureType": "administrative.locality", "elementType": "labels.text.fill", "stylers": [{"color": "#bdbdbd"}]}, {"featureType": "poi", "elementType": "labels.text.fill", "stylers": [{"color": "#757575"}]}, {"featureType": "poi.park", "elementType": "geometry", "stylers": [{"color": "#181818"}]}, {"featureType": "poi.park", "elementType": "labels.text.fill", "stylers": [{"color": "#616161"}]}, {"featureType": "poi.park", "elementType": "labels.text.stroke", "stylers": [{"color": "#1b1b1b"}]}, {"featureType": "road", "elementType": "geometry.fill", "stylers": [{"color": "#2c2c2c"}]}, {"featureType": "road", "elementType": "labels.text.fill", "stylers": [{"color": "#8a8a8a"}]}, {"featureType": "road.arterial", "elementType": "geometry", "stylers": [{"color": "#373737"}]}, {"featureType": "road.highway", "elementType": "geometry", "stylers": [{"color": "#3c3c3c"}]}, {"featureType": "road.highway.controlled_access", "elementType": "geometry", "stylers": [{"color": "#4e4e4e"}]}, {"featureType": "road.local", "elementType": "labels.text.fill", "stylers": [{"color": "#616161"}]}, {"featureType": "transit", "elementType": "labels.text.fill", "stylers": [{"color": "#757575"}]}, {"featureType": "water", "elementType": "geometry", "stylers": [{"color": "#000000"}]}, {"featureType": "water", "elementType": "labels.text.fill", "stylers": [{"color": "#3d3d3d"}]}],
           center: { lat: userLat, lng: userLng },
-          zoom: 13
+          zoom: 13,
+          mapTypeControl: true,
+          mapTypeControlOptions: {
+            style: google.maps.MapTypeControlStyle.DROPDOWN_MENU
+          }
         });
         // Create the draggable green arrow marker used to indicate the current
         // search center. Assign it to the global `youMarker` so it can be
-        // repositioned elsewhere (e.g., when geocoding a new address). When
-        // the marker is dragged to a new location, update the stored
-        // coordinates, recenter the map and perform a new search.
+        // repositioned later when the user enters a new address.
         youMarker = new google.maps.Marker({
-          position: { lat: userLat, lng: userLng },
-          map: map,
-          draggable: true,
-          title: 'Drag to change search center',
-          icon: {
-            path: google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
-            scale: 5,
-            fillColor: '#228B22',
-            fillOpacity: 1,
-            strokeWeight: 1,
-            strokeColor: '#1a641a'
-          }
-        });
+      position: { lat: userLat, lng: userLng },
+      map: map,
+      draggable: true,
+      title: 'Drag to change search center',
+      icon: {
+        path: google.maps.SymbolPath.BACKWARD_CLOSED_ARROW,
+        scale: 5,
+        fillColor: '#228B22',
+        fillOpacity: 1,
+        strokeWeight: 1,
+        strokeColor: '#1a641a'
+      }
+    });
         youMarker.addListener('dragend', (e) => {
           userLat = e.latLng.lat();
           userLng = e.latLng.lng();
@@ -210,9 +240,7 @@ h1 {
         // Recenter map to new location
         map.setCenter({ lat: userLat, lng: userLng });
         // Reposition the existing green arrow marker to the new location.
-        // If `youMarker` doesn't exist yet (for example, if the map hasn't
-        // finished loading), create it now with the correct icon and drag
-        // behavior. Otherwise, simply update its position.
+        // If it doesn't exist yet (e.g., map still loading), create it.
         if (youMarker) {
           youMarker.setPosition({ lat: userLat, lng: userLng });
         } else {
@@ -245,10 +273,9 @@ h1 {
       }
     }
 
-    // Enable pressing Enter in the address input to trigger geocoding.
-    // Without this, users must click the "Go" button after typing a location.
-    // Attaching the event listener here ensures the input exists in the DOM
-    // when the script runs.
+    // Allow pressing Enter in the address input to trigger geocoding instead of
+    // requiring a click on the Go button. This improves usability on both
+    // desktop and mobile devices.
     const addressInput = document.getElementById('address');
     if (addressInput) {
       addressInput.addEventListener('keydown', (e) => {
@@ -257,6 +284,35 @@ h1 {
           geocodeAddress();
         }
       });
+    }
+
+    // Toggle the visibility of the search/filter controls when the
+    // Filters button is tapped. This reduces screen real estate usage
+    // on small displays.
+    const toggleBtn = document.getElementById('toggle-controls');
+    const controlsDiv = document.getElementById('controls');
+    if (toggleBtn && controlsDiv) {
+      // Function to update the arrow icon based on the visibility of the controls
+      const updateToggleIcon = () => {
+        const currentDisplay = window.getComputedStyle(controlsDiv).display;
+        // Down arrow when panel is hidden, up arrow when visible
+        toggleBtn.textContent = currentDisplay === 'none' ? '▼' : '▲';
+      };
+      // Initialize the icon based on the initial state (e.g. hidden on small screens)
+      updateToggleIcon();
+      toggleBtn.addEventListener('click', () => {
+        const currentDisplay = window.getComputedStyle(controlsDiv).display;
+        if (currentDisplay === 'none') {
+          // When showing, use flex layout to match original styling
+          controlsDiv.style.display = 'flex';
+        } else {
+          controlsDiv.style.display = 'none';
+        }
+        // Update the icon after toggling
+        updateToggleIcon();
+      });
+      // Also update the icon on window resize to adapt to CSS media query changes
+      window.addEventListener('resize', updateToggleIcon);
     }
 
     /**
