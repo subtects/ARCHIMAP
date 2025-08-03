@@ -327,7 +327,9 @@ h1 {
       // implementation fetches up to 30 results (three pages) or stops early
       // if fewer items are returned. Adjust `maxPages` as needed, being
       // mindful of API quotas.
-      const maxPages = 3;
+      // The API supports up to 10 pages of 10 results each (100 total).
+      // Adjust maxPages to 10 to maximise the number of results returned.
+      const maxPages = 10;
       const allItems = [];
       for (let page = 0; page < maxPages; page++) {
         const startIndex = 1 + page * 10;
