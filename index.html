@@ -187,7 +187,13 @@ h1 {
       }
       // Clear any existing markers before plotting new ones.
       clearMarkers();
-      const apiURL = `https://www.googleapis.com/customsearch/v1?key=${pseApiKey}&cx=${pseCx}&q=${encodeURIComponent(query)}`;
+      // Always prefix user queries with the ArchDaily projects site filter to
+      // narrow results to the relevant host. This ensures we work around
+      // incorrectly configured CX patterns and increases recall on
+      // architecture project pages. Users can still override this by
+      // including their own site filter in the query.
+      const fullQuery = query.includes('site:') ? query : `${query} site:archdaily.com/projects`;
+      const apiURL = `https://www.googleapis.com/customsearch/v1?key=${pseApiKey}&cx=${pseCx}&q=${encodeURIComponent(fullQuery)}`;
       try {
         const resp = await fetch(apiURL);
         if (!resp.ok) {
@@ -222,45 +228,54 @@ h1 {
           } catch (err) {
             site = item.displayLink || '';
           }
-          // Geocode the article title. Using the Maps API key defined globally.
-          const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(title)}&key=${apiKey}`;
-          try {
-            const gResp = await fetch(geocodeUrl);
-            if (!gResp.ok) {
-              console.warn('Geocode request failed for', title);
-              continue;
-            }
-            const gData = await gResp.json();
-            if (gData.status !== 'OK' || !gData.results || gData.results.length === 0) {
-              console.warn('No geocode results for', title);
-              continue;
-            }
-            const location = gData.results[0].geometry.location;
-            const marker = new google.maps.Marker({
-              position: { lat: location.lat, lng: location.lng },
-              map: map,
-              title: title
-            });
-            markers.push(marker);
-            // Build info window content for this marker
-            let content = `<div class="info-window"><h3>${title}</h3>`;
-            if (site) {
-              content += `<p><strong>Site:</strong> ${site}</p>`;
-            }
-            if (snippet) {
-              content += `<p>${snippet}</p>`;
-            }
-            if (link) {
-              content += `<p><a href="${link}" target="_blank" rel="noopener">Read article</a></p>`;
-            }
-            content += '</div>';
-            const infoWindow = new google.maps.InfoWindow({ content: content });
-            marker.addListener('click', () => {
-              infoWindow.open(map, marker);
-            });
-          } catch (geErr) {
-            console.warn('Geocoding error for', title, geErr);
+          // Attempt to extract latitude/longitude directly from the linked
+          // ArchDaily page. If that fails, fall back to geocoding the title.
+          let coordinates = null;
+          if (link && /archdaily\.com/.test(link)) {
+            coordinates = await getArchdailyLatLng(link);
           }
+          if (!coordinates) {
+            // Geocode the article title using the Google Maps API
+            const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(title)}&key=${apiKey}`;
+            try {
+              const gResp = await fetch(geocodeUrl);
+              if (!gResp.ok) {
+                console.warn('Geocode request failed for', title);
+              } else {
+                const gData = await gResp.json();
+                if (gData.status === 'OK' && gData.results && gData.results.length > 0) {
+                  coordinates = gData.results[0].geometry.location;
+                }
+              }
+            } catch (geErr) {
+              console.warn('Geocoding error for', title, geErr);
+            }
+          }
+          if (!coordinates) {
+            continue;
+          }
+          const marker = new google.maps.Marker({
+            position: { lat: coordinates.lat, lng: coordinates.lng },
+            map: map,
+            title: title
+          });
+          markers.push(marker);
+          // Build info window content for this marker
+          let content = `<div class="info-window"><h3>${title}</h3>`;
+          if (site) {
+            content += `<p><strong>Site:</strong> ${site}</p>`;
+          }
+          if (snippet) {
+            content += `<p>${snippet}</p>`;
+          }
+          if (link) {
+            content += `<p><a href="${link}" target="_blank" rel="noopener">Read article</a></p>`;
+          }
+          content += '</div>';
+          const infoWindow = new google.maps.InfoWindow({ content: content });
+          marker.addListener('click', () => {
+            infoWindow.open(map, marker);
+          });
         }
       } catch (err) {
         console.error('PSE search error:', err);
@@ -352,7 +367,94 @@ h1 {
           break;
         }
       }
+      // Log all raw items to aid in troubleshooting ranking issues
+      console.log('PSE raw items:', allItems);
       return allItems;
+    }
+
+    /**
+     * Attempt to extract a precise latitude/longitude from an ArchDaily
+     * project page by parsing its JSON‑LD metadata. ArchDaily embeds a
+     * <script type="application/ld+json"> block on each project page that
+     * includes a Place object with an address containing latitude and
+     * longitude properties. This helper fetches the HTML, searches for the
+     * JSON‑LD block(s) and returns the first set of coordinates found.
+     * If any step fails or no coordinates exist, the function returns null.
+     *
+     * @param {string} url The project URL to fetch and parse
+     * @returns {Promise<{lat:number,lng:number}|null>} The extracted coordinates or null
+     */
+    async function getArchdailyLatLng(url) {
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) {
+          throw new Error(`Failed to fetch project page (${resp.status})`);
+        }
+        const html = await resp.text();
+        const regex = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+        let match;
+        while ((match = regex.exec(html)) !== null) {
+          const jsonText = match[1].trim();
+          try {
+            const parsed = JSON.parse(jsonText);
+            const objects = Array.isArray(parsed) ? parsed : [parsed];
+            for (const obj of objects) {
+              const coords = extractLatLonFromLd(obj);
+              if (coords) {
+                return coords;
+              }
+            }
+          } catch (e) {
+            // Skip malformed JSON blocks
+            continue;
+          }
+        }
+      } catch (err) {
+        console.warn('getArchdailyLatLng failed for', url, err);
+      }
+      return null;
+    }
+
+    /**
+     * Helper used by getArchdailyLatLng. Accepts a JSON‑LD object and
+     * returns a lat/lng pair if found. The Place object may embed
+     * coordinates in either address.latitude/longitude or geo.latitude/longitude
+     * fields. Returns null if no coordinates are present.
+     *
+     * @param {Object} obj The JSON‑LD object to inspect
+     * @returns {{lat:number,lng:number}|null}
+     */
+    function extractLatLonFromLd(obj) {
+      try {
+        // Some ArchDaily pages wrap the Place object inside a graph
+        if (obj['@graph'] && Array.isArray(obj['@graph'])) {
+          for (const item of obj['@graph']) {
+            const coords = extractLatLonFromLd(item);
+            if (coords) {
+              return coords;
+            }
+          }
+        }
+        if (obj['@type'] === 'Place') {
+          if (obj.geo && obj.geo.latitude && obj.geo.longitude) {
+            const lat = parseFloat(obj.geo.latitude);
+            const lng = parseFloat(obj.geo.longitude);
+            if (!isNaN(lat) && !isNaN(lng)) {
+              return { lat, lng };
+            }
+          }
+          if (obj.address && obj.address.latitude && obj.address.longitude) {
+            const lat = parseFloat(obj.address.latitude);
+            const lng = parseFloat(obj.address.longitude);
+            if (!isNaN(lat) && !isNaN(lng)) {
+              return { lat, lng };
+            }
+          }
+        }
+      } catch (err) {
+        // Ignore errors
+      }
+      return null;
     }
 
     /**
@@ -580,8 +682,27 @@ h1 {
       // Pull results from the PSE based on city or country. Try city first; if
       // none are found fall back to country. If both are null or no results
       // are returned, alert the user.
+      // Build a richer query combining city, country and a site filter. We
+      // include both the city and country in quotes to bias Google towards
+      // pages whose content mentions the location rather than just the title.
+      // Restrict the search to the ArchDaily projects path to avoid stray
+      // results and to compensate for potential misconfigured CX patterns.
+      let pseQuery = '';
+      if (city && country) {
+        pseQuery = `"${city}" "${country}" site:archdaily.com/projects`;
+      } else if (city) {
+        pseQuery = `"${city}" site:archdaily.com/projects`;
+      } else if (country) {
+        pseQuery = `"${country}" site:archdaily.com/projects`;
+      }
       let items = [];
-      if (city) {
+      if (pseQuery) {
+        items = await getPseResults(pseQuery);
+      }
+      // Fall back to the plain city name if no items were returned. This
+      // supports scenarios where ArchDaily pages rank too low for the site
+      // filter. If still no items, we alert the user below.
+      if ((!items || items.length === 0) && city) {
         items = await getPseResults(city);
       }
       if ((!items || items.length === 0) && country) {
@@ -613,31 +734,45 @@ h1 {
         } catch (err) {
           site = item.displayLink || '';
         }
-        // Try multiple geocoding queries (city, country, then title alone) to improve matches.
-        const geocodeQueries = [];
-        if (city) {
-          geocodeQueries.push(`${title} ${city}`);
-        }
-        if (country && country !== city) {
-          geocodeQueries.push(`${title} ${country}`);
-        }
-        geocodeQueries.push(title);
+        // First attempt to get precise coordinates by scraping the JSON‑LD
+        // metadata embedded in ArchDaily project pages. This bypasses the
+        // limitations of geocoding the title when the city name does not
+        // appear in the title.
         let foundLocation = null;
-        for (const queryStr of geocodeQueries) {
-          const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(queryStr)}&key=${apiKey}`;
-          try {
-            const gResp = await fetch(geocodeUrl);
-            if (!gResp.ok) {
-              console.warn('Geocode request failed for', title, 'with query', queryStr);
-              continue;
+        if (link && /archdaily\.com/.test(link)) {
+          foundLocation = await getArchdailyLatLng(link);
+        }
+        // If JSON‑LD scraping failed, fall back to geocoding the title
+        // combined with city and/or country. We test several variants
+        // (title + city, title + country, title alone) until the Maps API
+        // returns a result. This is necessary because many project titles
+        // omit the city but geocoder heuristics can still succeed if the
+        // context is provided.
+        if (!foundLocation) {
+          const geocodeQueries = [];
+          if (city) {
+            geocodeQueries.push(`${title} ${city}`);
+          }
+          if (country && country !== city) {
+            geocodeQueries.push(`${title} ${country}`);
+          }
+          geocodeQueries.push(title);
+          for (const queryStr of geocodeQueries) {
+            const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(queryStr)}&key=${apiKey}`;
+            try {
+              const gResp = await fetch(geocodeUrl);
+              if (!gResp.ok) {
+                console.warn('Geocode request failed for', title, 'with query', queryStr);
+                continue;
+              }
+              const gData = await gResp.json();
+              if (gData.status === 'OK' && gData.results && gData.results.length > 0) {
+                foundLocation = gData.results[0].geometry.location;
+                break;
+              }
+            } catch (err) {
+              console.warn('Geocode error for', title, 'with query', queryStr, ':', err);
             }
-            const gData = await gResp.json();
-            if (gData.status === 'OK' && gData.results && gData.results.length > 0) {
-              foundLocation = gData.results[0].geometry.location;
-              break;
-            }
-          } catch (err) {
-            console.warn('Geocode error for', title, 'with query', queryStr, ':', err);
           }
         }
         if (!foundLocation) {
