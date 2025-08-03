@@ -123,6 +123,18 @@ h1 {
     <button style="background:#333;color:#ccc;border:1px solid #555;padding:4px 8px;" onclick="geocodeAddress()">Go</button>
   </div>
   <div id="map"></div>
+
+  <!--
+    The following script and container embed a Google Custom Search Engine (CSE)
+    search box on the page. This search box queries your custom engine defined
+    by the cx value above (76d6c678a45b64fda). Results returned by this search
+    box appear inline beneath the input field. It works independently from the
+    map integration implemented in the JavaScript above but provides a
+    convenient fallback UI for users who wish to perform a site‑restricted
+    search without relying on the map interface.
+  -->
+  <script async src="https://cse.google.com/cse.js?cx=76d6c678a45b64fda"></script>
+  <div class="gcse-search"></div>
   <script>
     // Google Maps API key used for both map and geocoding. Update this
     // variable if you change the key in the script tag below.
@@ -135,6 +147,217 @@ h1 {
     let userLat = null;
     let userLng = null;
     let markers = [];
+
+    /**
+     * -------------------------------------------------------------------------
+     *  Google Programmable Search Engine (PSE) Integration
+     *
+     *  This application can optionally query a Google Programmable Search
+     *  Engine (also known as Custom Search Engine) to fetch architecture
+     *  articles from third‑party sites like Archdaily, Dezeen and Archinect.
+     *
+     *  To enable PSE searching you must set up your own search engine at
+     *  https://programmablesearchengine.google.com/about/ and restrict it to
+     *  the desired sites. Then populate the two constants below with your
+     *  Google API key and the custom search engine ID (cx). Leaving these
+     *  values blank will disable PSE integration and fall back to the
+     *  Wikipedia geosearch logic implemented later in this file.
+     */
+    // API key used for PSE requests. This key is the same as your Google Maps
+    // key; Google allows using a single key for multiple services. Replace
+    // this string with your real API key if different.
+    const pseApiKey = 'AIzaSyDDLRyAF2vvdjYZuPCD2jko4M9tY125wjg';
+    // Custom search engine ID generated when you created your PSE. Replace
+    // this with your own CX identifier.
+    const pseCx = '76d6c678a45b64fda';
+
+    /**
+     * Perform a search against a Google Programmable Search Engine and plot the
+     * resulting articles on the map. Each result is geocoded using the
+     * article title; duplicate titles are ignored. Markers created by this
+     * function are stored in the global `markers` array for later cleanup.
+     *
+     * @param {string} query The search query to pass to the custom search API.
+     */
+    async function searchWithPSE(query) {
+      // If no API key or cx is configured, do nothing.
+      if (!pseApiKey || !pseCx) {
+        console.warn('PSE API key or search engine ID not provided; skipping PSE search');
+        return;
+      }
+      // Clear any existing markers before plotting new ones.
+      clearMarkers();
+      const apiURL = `https://www.googleapis.com/customsearch/v1?key=${pseApiKey}&cx=${pseCx}&q=${encodeURIComponent(query)}`;
+      try {
+        const resp = await fetch(apiURL);
+        if (!resp.ok) {
+          throw new Error(`PSE request failed with status ${resp.status}`);
+        }
+        const data = await resp.json();
+        const items = data.items || [];
+        if (items.length === 0) {
+          alert('No PSE results found for your query.');
+          return;
+        }
+        const seen = new Set();
+        for (const item of items) {
+          // Normalise title and skip if we have already plotted it
+          const title = item.title || '';
+          const fingerprint = title.trim().toLowerCase();
+          if (seen.has(fingerprint) || !fingerprint) {
+            continue;
+          }
+          seen.add(fingerprint);
+          const snippet = item.snippet || '';
+          const link = item.link || '';
+          // Derive the domain from the link if available; fallback to displayLink
+          let site = '';
+          try {
+            if (link) {
+              const urlObj = new URL(link);
+              site = urlObj.hostname;
+            } else if (item.displayLink) {
+              site = item.displayLink;
+            }
+          } catch (err) {
+            site = item.displayLink || '';
+          }
+          // Geocode the article title. Using the Maps API key defined globally.
+          const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(title)}&key=${apiKey}`;
+          try {
+            const gResp = await fetch(geocodeUrl);
+            if (!gResp.ok) {
+              console.warn('Geocode request failed for', title);
+              continue;
+            }
+            const gData = await gResp.json();
+            if (gData.status !== 'OK' || !gData.results || gData.results.length === 0) {
+              console.warn('No geocode results for', title);
+              continue;
+            }
+            const location = gData.results[0].geometry.location;
+            const marker = new google.maps.Marker({
+              position: { lat: location.lat, lng: location.lng },
+              map: map,
+              title: title
+            });
+            markers.push(marker);
+            // Build info window content for this marker
+            let content = `<div class="info-window"><h3>${title}</h3>`;
+            if (site) {
+              content += `<p><strong>Site:</strong> ${site}</p>`;
+            }
+            if (snippet) {
+              content += `<p>${snippet}</p>`;
+            }
+            if (link) {
+              content += `<p><a href="${link}" target="_blank" rel="noopener">Read article</a></p>`;
+            }
+            content += '</div>';
+            const infoWindow = new google.maps.InfoWindow({ content: content });
+            marker.addListener('click', () => {
+              infoWindow.open(map, marker);
+            });
+          } catch (geErr) {
+            console.warn('Geocoding error for', title, geErr);
+          }
+        }
+      } catch (err) {
+        console.error('PSE search error:', err);
+        alert('An error occurred while fetching data from the custom search API.');
+      }
+    }
+
+    /**
+     * Reverse geocode a latitude/longitude to obtain the city and country names.
+     * Uses the Google Maps Geocoding API. Returns an object with `city` and
+     * `country` properties; if no city or country is found the value will be
+     * `null`. A missing API key or request error results in both values being
+     * `null`.
+     *
+     * @param {number} lat Latitude to reverse geocode
+     * @param {number} lng Longitude to reverse geocode
+     * @returns {Promise<{city: string|null, country: string|null}>}
+     */
+    async function getCityAndCountry(lat, lng) {
+      const result = { city: null, country: null };
+      try {
+        const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${apiKey}`;
+        const resp = await fetch(url);
+        if (!resp.ok) {
+          console.warn('Reverse geocode request failed with status', resp.status);
+          return result;
+        }
+        const data = await resp.json();
+        if (!data.results || data.results.length === 0) {
+          console.warn('No reverse geocode results for location');
+          return result;
+        }
+        // Inspect address components of the first result
+        const components = data.results[0].address_components || [];
+        for (const comp of components) {
+          if (comp.types.includes('locality')) {
+            result.city = comp.long_name;
+          }
+          if (comp.types.includes('country')) {
+            result.country = comp.long_name;
+          }
+        }
+      } catch (err) {
+        console.error('Reverse geocode error:', err);
+      }
+      return result;
+    }
+
+    /**
+     * Query the Programmable Search Engine and return the raw result items.
+     * This helper does not create markers or modify the map. It simply
+     * performs the fetch and returns the `items` array from the API response.
+     * Any errors are swallowed and result in an empty array.
+     *
+     * @param {string} query The search string to send to the PSE
+     * @returns {Promise<Array>} List of search result objects
+     */
+    async function getPseResults(query) {
+      if (!pseApiKey || !pseCx) {
+        return [];
+      }
+      const apiURL = `https://www.googleapis.com/customsearch/v1?key=${pseApiKey}&cx=${pseCx}&q=${encodeURIComponent(query)}`;
+      try {
+        const resp = await fetch(apiURL);
+        if (!resp.ok) {
+          console.warn('PSE request failed with status', resp.status);
+          return [];
+        }
+        const data = await resp.json();
+        return data.items || [];
+      } catch (err) {
+        console.error('PSE fetch error:', err);
+        return [];
+      }
+    }
+
+    /**
+     * Compute the great‑circle distance between two coordinates using the
+     * Haversine formula. Returns the distance in kilometres.
+     *
+     * @param {number} lat1 Latitude of first point
+     * @param {number} lng1 Longitude of first point
+     * @param {number} lat2 Latitude of second point
+     * @param {number} lng2 Longitude of second point
+     * @returns {number} Distance in kilometres
+     */
+    function haversine(lat1, lng1, lat2, lng2) {
+      const toRad = deg => deg * Math.PI / 180;
+      const R = 6371; // Earth radius in km
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lng2 - lng1);
+      const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                Math.sin(dLng / 2) * Math.sin(dLng / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
 
     /**
      * Initialize the Google Map. This function attempts to determine the
@@ -327,111 +550,102 @@ h1 {
         alert('Map not yet initialized. Please wait.');
         return;
       }
+      // Fetch the search radius from the input and default to 5 km if invalid.
       const radiusKm = parseFloat(document.getElementById('radius').value);
       const radius = isNaN(radiusKm) ? 5 : radiusKm;
-      const dateFrom = parseInt(document.getElementById('date_from').value);
-      const dateTo = parseInt(document.getElementById('date_to').value);
-      const keyword = document.getElementById('keyword').value.trim().toLowerCase();
-      // Build geosearch URL. The pipe in coordinates must be encoded.
-      const geoUrl = `https://en.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${encodeURIComponent(userLat + '|' + userLng)}&gsradius=${Math.round(radius * 1000)}&gslimit=50&format=json&origin=*`;
-      try {
-        clearMarkers();
-        const geoResp = await fetch(geoUrl);
-        const geoData = await geoResp.json();
-        const pages = geoData?.query?.geosearch || [];
-        if (pages.length === 0) {
-          alert('No results found within the specified radius.');
-          return;
+      // Clear any existing markers before adding new ones.
+      clearMarkers();
+      // Determine the city and country corresponding to the current marker location.
+      const place = await getCityAndCountry(userLat, userLng);
+      let city = place.city;
+      let country = place.country;
+      // Pull results from the PSE based on city or country. Try city first; if
+      // none are found fall back to country. If both are null or no results
+      // are returned, alert the user.
+      let items = [];
+      if (city) {
+        items = await getPseResults(city);
+      }
+      if ((!items || items.length === 0) && country) {
+        items = await getPseResults(country);
+      }
+      if (!items || items.length === 0) {
+        alert('No results found for your location.');
+        return;
+      }
+      const seen = new Set();
+      let addedCount = 0;
+      for (const item of items) {
+        const title = item.title || '';
+        const fingerprint = title.trim().toLowerCase();
+        if (!fingerprint || seen.has(fingerprint)) {
+          continue;
         }
-        for (const page of pages) {
-          // Fetch summary for each page
-          const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(page.title)}`;
-          let description = '';
-          let imageUrl = '';
-          try {
-            const summaryResp = await fetch(summaryUrl);
-            if (summaryResp.ok) {
-              const summaryData = await summaryResp.json();
-              description = summaryData.extract || '';
-              if (summaryData.thumbnail && summaryData.thumbnail.source) {
-                imageUrl = summaryData.thumbnail.source;
-              }
-            }
-          } catch (err) {
-            console.warn('Summary fetch failed for', page.title, err);
+        seen.add(fingerprint);
+        const snippet = item.snippet || '';
+        const link = item.link || '';
+        let site = '';
+        try {
+          if (link) {
+            const urlObj = new URL(link);
+            site = urlObj.hostname;
+          } else if (item.displayLink) {
+            site = item.displayLink;
           }
-          // Keyword filtering: skip if keyword specified and not present
-          if (keyword) {
-            const contentString = (page.title + ' ' + description).toLowerCase();
-            if (!contentString.includes(keyword)) {
-              continue;
-            }
-          }
-          // Fetch Wikidata item to get inception year (P571)
-          let inceptionYear = null;
-          try {
-            const propsUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(page.title)}&prop=pageprops&format=json&origin=*`;
-            const propsResp = await fetch(propsUrl);
-            if (propsResp.ok) {
-              const propsData = await propsResp.json();
-              const pagesObj = propsData?.query?.pages;
-              const pageId = pagesObj && Object.keys(pagesObj)[0];
-              const wikidataId = pagesObj && pagesObj[pageId]?.pageprops?.wikibase_item;
-              if (wikidataId) {
-                const entityUrl = `https://www.wikidata.org/wiki/Special:EntityData/${wikidataId}.json`;
-                const entityResp = await fetch(entityUrl);
-                if (entityResp.ok) {
-                  const entityData = await entityResp.json();
-                  const entity = entityData?.entities?.[wikidataId];
-                  const p571 = entity?.claims?.P571;
-                  if (p571 && p571.length > 0) {
-                    const timeStr = p571[0].mainsnak.datavalue.value.time;
-                    const match = timeStr.match(/([+-]?\d{4})/);
-                    if (match) {
-                      inceptionYear = parseInt(match[1], 10);
-                    }
-                  }
-                }
-              }
-            }
-          } catch (err) {
-            console.warn('Wikidata fetch failed for', page.title, err);
-          }
-          // Date range filtering: if inceptionYear is available, compare
-          if (!isNaN(dateFrom) && inceptionYear !== null && inceptionYear < dateFrom) {
+        } catch (err) {
+          site = item.displayLink || '';
+        }
+        // Build a geocode query string; append the city name if available
+        const geocodeQuery = city ? `${title} ${city}` : title;
+        const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(geocodeQuery)}&key=${apiKey}`;
+        try {
+          const gResp = await fetch(geocodeUrl);
+          if (!gResp.ok) {
+            console.warn('Geocode request failed for', title);
             continue;
           }
-          if (!isNaN(dateTo) && inceptionYear !== null && inceptionYear > dateTo) {
+          const gData = await gResp.json();
+          if (gData.status !== 'OK' || !gData.results || gData.results.length === 0) {
+            console.warn('No geocode results for', title);
             continue;
           }
-          // Create marker on the map
+          const location = gData.results[0].geometry.location;
+          // Filter out results that fall outside the radius
+          const distance = haversine(userLat, userLng, location.lat, location.lng);
+          if (distance > radius) {
+            continue;
+          }
+          // Create marker and info window for valid result
           const marker = new google.maps.Marker({
-            position: { lat: page.lat, lng: page.lon },
+            position: { lat: location.lat, lng: location.lng },
             map: map,
-            title: page.title
+            title: title
           });
           markers.push(marker);
-          // Build content for info window
-          let content = `<div class="info-window"><h3>${page.title}</h3>`;
-          if (inceptionYear) {
-            content += `<p><strong>Year:</strong> ${inceptionYear}</p>`;
+          addedCount++;
+          let content = `<div class="info-window"><h3>${title}</h3>`;
+          if (site) {
+            content += `<p><strong>Site:</strong> ${site}</p>`;
           }
-          if (description) {
-            content += `<p>${description}</p>`;
+          if (snippet) {
+            content += `<p>${snippet}</p>`;
           }
-          if (imageUrl) {
-            content += `<img src="${imageUrl}" alt="${page.title}" style="max-width:100%;height:auto;margin-bottom:0.5rem;">`;
+          if (link) {
+            content += `<p><a href="${link}" target="_blank" rel="noopener">Read article</a></p>`;
           }
-          content += `<p><a href="https://en.wikipedia.org/wiki/${encodeURIComponent(page.title)}" target="_blank" rel="noopener">Read more on Wikipedia</a></p></div>`;
+          content += '</div>';
           const infoWindow = new google.maps.InfoWindow({ content: content });
           marker.addListener('click', () => {
             infoWindow.open(map, marker);
           });
+        } catch (geErr) {
+          console.warn('Geocoding error for', title, geErr);
         }
-      } catch (err) {
-        console.error('Geosearch error:', err);
-        alert('An error occurred while fetching data. Please try again.');
       }
+      if (addedCount === 0) {
+        alert('No results found within the specified radius.');
+      }
+      return;
     }
   </script>
   <!--
