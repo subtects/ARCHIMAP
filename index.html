@@ -322,19 +322,35 @@ h1 {
       if (!pseApiKey || !pseCx) {
         return [];
       }
-      const apiURL = `https://www.googleapis.com/customsearch/v1?key=${pseApiKey}&cx=${pseCx}&q=${encodeURIComponent(query)}`;
-      try {
-        const resp = await fetch(apiURL);
-        if (!resp.ok) {
-          console.warn('PSE request failed with status', resp.status);
-          return [];
+      // The Custom Search API returns only up to 10 results per request. To
+      // retrieve more results, we paginate using the `start` parameter. This
+      // implementation fetches up to 30 results (three pages) or stops early
+      // if fewer items are returned. Adjust `maxPages` as needed, being
+      // mindful of API quotas.
+      const maxPages = 3;
+      const allItems = [];
+      for (let page = 0; page < maxPages; page++) {
+        const startIndex = 1 + page * 10;
+        const apiURL = `https://www.googleapis.com/customsearch/v1?key=${pseApiKey}&cx=${pseCx}&q=${encodeURIComponent(query)}&start=${startIndex}`;
+        try {
+          const resp = await fetch(apiURL);
+          if (!resp.ok) {
+            console.warn('PSE request failed with status', resp.status, 'for page', page + 1);
+            break;
+          }
+          const data = await resp.json();
+          const items = data.items || [];
+          allItems.push(...items);
+          // If fewer than 10 items were returned, no more pages are available
+          if (items.length < 10) {
+            break;
+          }
+        } catch (err) {
+          console.error('PSE fetch error on page', page + 1, ':', err);
+          break;
         }
-        const data = await resp.json();
-        return data.items || [];
-      } catch (err) {
-        console.error('PSE fetch error:', err);
-        return [];
       }
+      return allItems;
     }
 
     /**
@@ -595,52 +611,64 @@ h1 {
         } catch (err) {
           site = item.displayLink || '';
         }
-        // Build a geocode query string; append the city name if available
-        const geocodeQuery = city ? `${title} ${city}` : title;
-        const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(geocodeQuery)}&key=${apiKey}`;
-        try {
-          const gResp = await fetch(geocodeUrl);
-          if (!gResp.ok) {
-            console.warn('Geocode request failed for', title);
-            continue;
-          }
-          const gData = await gResp.json();
-          if (gData.status !== 'OK' || !gData.results || gData.results.length === 0) {
-            console.warn('No geocode results for', title);
-            continue;
-          }
-          const location = gData.results[0].geometry.location;
-          // Filter out results that fall outside the radius
-          const distance = haversine(userLat, userLng, location.lat, location.lng);
-          if (distance > radius) {
-            continue;
-          }
-          // Create marker and info window for valid result
-          const marker = new google.maps.Marker({
-            position: { lat: location.lat, lng: location.lng },
-            map: map,
-            title: title
-          });
-          markers.push(marker);
-          addedCount++;
-          let content = `<div class="info-window"><h3>${title}</h3>`;
-          if (site) {
-            content += `<p><strong>Site:</strong> ${site}</p>`;
-          }
-          if (snippet) {
-            content += `<p>${snippet}</p>`;
-          }
-          if (link) {
-            content += `<p><a href="${link}" target="_blank" rel="noopener">Read article</a></p>`;
-          }
-          content += '</div>';
-          const infoWindow = new google.maps.InfoWindow({ content: content });
-          marker.addListener('click', () => {
-            infoWindow.open(map, marker);
-          });
-        } catch (geErr) {
-          console.warn('Geocoding error for', title, geErr);
+        // Try multiple geocoding queries (city, country, then title alone) to improve matches.
+        const geocodeQueries = [];
+        if (city) {
+          geocodeQueries.push(`${title} ${city}`);
         }
+        if (country && country !== city) {
+          geocodeQueries.push(`${title} ${country}`);
+        }
+        geocodeQueries.push(title);
+        let foundLocation = null;
+        for (const queryStr of geocodeQueries) {
+          const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(queryStr)}&key=${apiKey}`;
+          try {
+            const gResp = await fetch(geocodeUrl);
+            if (!gResp.ok) {
+              console.warn('Geocode request failed for', title, 'with query', queryStr);
+              continue;
+            }
+            const gData = await gResp.json();
+            if (gData.status === 'OK' && gData.results && gData.results.length > 0) {
+              foundLocation = gData.results[0].geometry.location;
+              break;
+            }
+          } catch (err) {
+            console.warn('Geocode error for', title, 'with query', queryStr, ':', err);
+          }
+        }
+        if (!foundLocation) {
+          continue;
+        }
+        // Filter out results that fall outside the radius
+        const distance = haversine(userLat, userLng, foundLocation.lat, foundLocation.lng);
+        if (distance > radius) {
+          continue;
+        }
+        // Create marker and info window for valid result
+        const marker = new google.maps.Marker({
+          position: { lat: foundLocation.lat, lng: foundLocation.lng },
+          map: map,
+          title: title
+        });
+        markers.push(marker);
+        addedCount++;
+        let content = `<div class="info-window"><h3>${title}</h3>`;
+        if (site) {
+          content += `<p><strong>Site:</strong> ${site}</p>`;
+        }
+        if (snippet) {
+          content += `<p>${snippet}</p>`;
+        }
+        if (link) {
+          content += `<p><a href="${link}" target="_blank" rel="noopener">Read article</a></p>`;
+        }
+        content += '</div>';
+        const infoWindow = new google.maps.InfoWindow({ content: content });
+        marker.addListener('click', () => {
+          infoWindow.open(map, marker);
+        });
       }
       if (addedCount === 0) {
         alert('No results found within the specified radius.');
