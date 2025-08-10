@@ -212,48 +212,78 @@ h1 {
      */
     async function getCanonicalAndLatLng(item) {
       let link = item.link || '';
-      // Prefer canonical candidates already present in the PSE metadata
+      // Variables to store extracted data
+      let canonical = null;
+      let latitude = null;
+      let longitude = null;
+      let locality = null;
+      let region = null;
+      let country = null;
+      // Prefer canonical candidates and coordinates present in the PSE metadata first
       try {
         if (item.pagemap && Array.isArray(item.pagemap.metatags) && item.pagemap.metatags.length > 0) {
           const meta = item.pagemap.metatags[0] || {};
+          // Canonical URL candidates
           const canonicalCandidate = meta['og:url'] || meta['twitter:url'] || meta['citation_url'];
           if (typeof canonicalCandidate === 'string' && canonicalCandidate.trim()) {
-            link = canonicalCandidate;
+            canonical = canonicalCandidate.trim();
+            link = canonical;
           }
+          // Latitude/longitude from meta tags (e.g. Facebook Open Graph or Places)
+          const latMeta = meta['og:latitude'] || meta['place:location:latitude'] || meta['geo:lat'];
+          const lngMeta = meta['og:longitude'] || meta['place:location:longitude'] || meta['geo:lon'] || meta['geo:lng'];
+          if (latMeta && !isNaN(parseFloat(latMeta))) {
+            latitude = parseFloat(latMeta);
+          }
+          if (lngMeta && !isNaN(parseFloat(lngMeta))) {
+            longitude = parseFloat(lngMeta);
+          }
+          // Some meta tags specify position as "lat;lon"
+          const positionMeta = meta['geo.position'];
+          if ((!latitude || !longitude) && typeof positionMeta === 'string' && positionMeta.includes(';')) {
+            const parts = positionMeta.split(';');
+            const latVal = parseFloat(parts[0]);
+            const lngVal = parseFloat(parts[1]);
+            if (!isNaN(latVal) && !isNaN(lngVal)) {
+              latitude = latVal;
+              longitude = lngVal;
+            }
+          }
+          // Address components that may appear in meta tags (e.g. Twitter Cards)
+          locality = meta['place:location:locality'] || meta['addressLocality'] || meta['locality'] || locality;
+          region = meta['place:location:region'] || meta['addressRegion'] || region;
+          country = meta['place:location:country'] || meta['addressCountry'] || country;
         }
       } catch (err) {
         // Ignore metadata extraction errors
       }
-      // Sanity check: we must have a URL to fetch
+      // Sanity check: we must have some URL to fetch; if canonical is absent, use item.link
       if (!link) {
-        return { canonical: null, lat: null, lng: null };
+        return { canonical: canonical, lat: latitude, lng: longitude, locality: locality, region: region, country: country };
       }
-      let canonical = null;
-      let latitude = null;
-      let longitude = null;
       try {
         const resp = await fetchWithCors(link);
         if (!resp.ok) {
           console.warn('Failed to fetch', link, 'status', resp.status);
-          return { canonical: null, lat: null, lng: null };
+          return { canonical: canonical, lat: latitude, lng: longitude, locality: locality, region: region, country: country };
         }
         const html = await resp.text();
-        // Parse HTML using DOMParser if available in this environment
         const parser = new DOMParser();
         const doc = parser.parseFromString(html, 'text/html');
         // Canonical link via <link rel="canonical">
         const canonicalEl = doc.querySelector('link[rel="canonical"]');
-        if (canonicalEl && canonicalEl.href) {
+        if (!canonical && canonicalEl && canonicalEl.href) {
           canonical = canonicalEl.href;
         }
         // Fallback to og:url meta tag
         if (!canonical) {
-          const ogUrl = doc.querySelector('meta[property="og:url"]');
-          if (ogUrl && ogUrl.getAttribute('content')) {
-            canonical = ogUrl.getAttribute('content');
+          const ogUrlEl = doc.querySelector('meta[property="og:url"]');
+          const contentVal = ogUrlEl && ogUrlEl.getAttribute('content');
+          if (contentVal) {
+            canonical = contentVal;
           }
         }
-        // Extract coordinates from JSON‑LD blocks
+        // Attempt to extract address components and coordinates from JSON‑LD blocks
         const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
         for (const script of scripts) {
           const jsonText = script.textContent || script.innerText || '';
@@ -261,29 +291,36 @@ h1 {
             const json = JSON.parse(jsonText);
             const objs = Array.isArray(json) ? json : [json];
             for (const obj of objs) {
-              // Search for GeoCoordinates
+              // Search for GeoCoordinates directly
               if (obj['@type'] === 'GeoCoordinates' && typeof obj.latitude === 'number' && typeof obj.longitude === 'number') {
-                latitude = obj.latitude;
-                longitude = obj.longitude;
+                latitude = latitude ?? obj.latitude;
+                longitude = longitude ?? obj.longitude;
               }
-              // Search for Place with geo
-              if (obj['@type'] === 'Place' && obj.geo && typeof obj.geo.latitude === 'number' && typeof obj.geo.longitude === 'number') {
-                latitude = obj.geo.latitude;
-                longitude = obj.geo.longitude;
-              }
-              // Some ArchDaily JSON uses nested address
-              if (obj['@type'] === 'Place' && obj.address) {
-                // If it contains latitude/longitude keys
-                if (typeof obj.address.latitude === 'number' && typeof obj.address.longitude === 'number') {
-                  latitude = obj.address.latitude;
-                  longitude = obj.address.longitude;
+              // Search for Place with geo coordinates
+              if (obj['@type'] === 'Place') {
+                // Coordinates nested under geo
+                if (obj.geo && typeof obj.geo.latitude === 'number' && typeof obj.geo.longitude === 'number') {
+                  latitude = latitude ?? obj.geo.latitude;
+                  longitude = longitude ?? obj.geo.longitude;
+                }
+                // Coordinates nested under address
+                if (obj.address) {
+                  // Some schemas put lat/lon inside address
+                  if (typeof obj.address.latitude === 'number' && typeof obj.address.longitude === 'number') {
+                    latitude = latitude ?? obj.address.latitude;
+                    longitude = longitude ?? obj.address.longitude;
+                  }
+                  // Capture locality/region/country for geocoding fallback
+                  locality = locality || obj.address.addressLocality || locality;
+                  region = region || obj.address.addressRegion || region;
+                  country = country || obj.address.addressCountry || country;
                 }
               }
             }
           } catch (jsonErr) {
             // Ignore JSON parse errors
           }
-          // Break early if coordinates found
+          // If we already have both coordinates, we can break early
           if (latitude !== null && longitude !== null) {
             break;
           }
@@ -291,7 +328,7 @@ h1 {
       } catch (err) {
         console.warn('Error scraping', link, err);
       }
-      return { canonical: canonical, lat: latitude, lng: longitude };
+      return { canonical: canonical, lat: latitude, lng: longitude, locality: locality, region: region, country: country };
     }
 
     /**
@@ -735,7 +772,10 @@ h1 {
       // a search and notify the user.
       let queryString = '';
       if (city && country) {
-        queryString = `"${city}" "${country}"`;
+        // Use an unquoted combination of city and country to allow Google to
+        // match pages mentioning either term anywhere in the document. Quoted
+        // queries can overly constrain results.
+        queryString = `${city} ${country}`;
       } else if (city) {
         queryString = city;
       } else if (country) {
@@ -793,24 +833,50 @@ h1 {
         } catch (err) {
           site = item.displayLink || '';
         }
-        // Determine coordinates: prefer JSON‑LD from extraData; otherwise
-        // attempt to geocode the title combined with city/country. This
-        // fallback uses the Google Geocoding API via the apiKey. It
-        // constructs multiple queries ordered from most specific (title
-        // + city) to least (title alone).
+        // Determine coordinates: prefer JSON‑LD or meta lat/lon from extraData; otherwise
+        // attempt to geocode using various combinations of title and location
+        // components (city, country, region, locality) from both the marker
+        // reverse geocode and the scraped page. This fallback uses the
+        // Google Geocoding API via the apiKey. Queries are ordered from
+        // most specific (title + locality + country) to least (title alone).
         let foundLocation = null;
         if (extraData.lat !== null && extraData.lng !== null) {
           foundLocation = { lat: extraData.lat, lng: extraData.lng };
         } else {
           const geocodeQueries = [];
+          // Use locality/region from the scraped page if available
+          if (extraData.locality && extraData.country) {
+            geocodeQueries.push(`${extraData.locality} ${extraData.country}`);
+          }
+          if (extraData.region && extraData.country) {
+            geocodeQueries.push(`${extraData.region} ${extraData.country}`);
+          }
+          if (title && extraData.locality && extraData.country) {
+            geocodeQueries.push(`${title} ${extraData.locality} ${extraData.country}`);
+          }
+          if (title && extraData.region && extraData.country) {
+            geocodeQueries.push(`${title} ${extraData.region} ${extraData.country}`);
+          }
+          // Fallback to using the detected city/country from the marker location
           if (city) {
             geocodeQueries.push(`${title} ${city}`);
           }
           if (country && country !== city) {
             geocodeQueries.push(`${title} ${country}`);
           }
+          // Always include the bare title as the last resort
           geocodeQueries.push(title);
-          for (const queryStr of geocodeQueries) {
+          // Deduplicate queries while preserving order
+          const uniqueQueries = [];
+          const seenQuerySet = new Set();
+          for (const q of geocodeQueries) {
+            const trimmed = q.trim();
+            if (trimmed && !seenQuerySet.has(trimmed.toLowerCase())) {
+              uniqueQueries.push(trimmed);
+              seenQuerySet.add(trimmed.toLowerCase());
+            }
+          }
+          for (const queryStr of uniqueQueries) {
             const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(queryStr)}&key=${apiKey}`;
             try {
               const gResp = await fetch(geocodeUrl);
