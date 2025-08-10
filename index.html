@@ -172,6 +172,129 @@ h1 {
     const pseCx = '76d6c678a45b64fda';
 
     /**
+     * Optional CORS proxy. Some architecture sites do not set CORS headers,
+     * so attempts to fetch their pages from the browser may be blocked. If
+     * you encounter CORS errors when scraping JSON‑LD for latitude/longitude
+     * or canonical URLs, set this to a proxy such as
+     * "https://cors-anywhere.herokuapp.com/" or your own reverse proxy. When
+     * empty, requests are made directly to the target site. Note that
+     * public proxies may enforce rate limits.
+     */
+    const CORS_PROXY = '';
+
+    /**
+     * Fetch a URL using an optional CORS proxy. If CORS_PROXY is defined
+     * and the URL does not already start with it, the proxy prefix is
+     * prepended. Returns the Response object from fetch(). This helper
+     * centralises proxy handling in one place.
+     *
+     * @param {string} url The absolute URL to request
+     * @returns {Promise<Response>}
+     */
+    async function fetchWithCors(url) {
+      // Avoid double‑prefixing if the proxy is already included
+      const proxiedUrl = (CORS_PROXY && !url.startsWith(CORS_PROXY)) ? CORS_PROXY + url : url;
+      return fetch(proxiedUrl);
+    }
+
+    /**
+     * Attempt to retrieve the canonical URL and geographic coordinates from
+     * the destination page. Many architecture websites embed a JSON‑LD block
+     * describing the project, including latitude and longitude. This helper
+     * fetches the page (via an optional CORS proxy), parses out the
+     * canonical link and tries to extract coordinates from JSON‑LD. If
+     * either canonical URL or coordinates cannot be determined, the
+     * corresponding value is omitted. Errors are logged and swallowed so
+     * calling code can fall back gracefully.
+     *
+     * @param {Object} item A result object returned by the PSE
+     * @returns {Promise<{canonical: string|null, lat: number|null, lng: number|null}>}
+     */
+    async function getCanonicalAndLatLng(item) {
+      let link = item.link || '';
+      // Prefer canonical candidates already present in the PSE metadata
+      try {
+        if (item.pagemap && Array.isArray(item.pagemap.metatags) && item.pagemap.metatags.length > 0) {
+          const meta = item.pagemap.metatags[0] || {};
+          const canonicalCandidate = meta['og:url'] || meta['twitter:url'] || meta['citation_url'];
+          if (typeof canonicalCandidate === 'string' && canonicalCandidate.trim()) {
+            link = canonicalCandidate;
+          }
+        }
+      } catch (err) {
+        // Ignore metadata extraction errors
+      }
+      // Sanity check: we must have a URL to fetch
+      if (!link) {
+        return { canonical: null, lat: null, lng: null };
+      }
+      let canonical = null;
+      let latitude = null;
+      let longitude = null;
+      try {
+        const resp = await fetchWithCors(link);
+        if (!resp.ok) {
+          console.warn('Failed to fetch', link, 'status', resp.status);
+          return { canonical: null, lat: null, lng: null };
+        }
+        const html = await resp.text();
+        // Parse HTML using DOMParser if available in this environment
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        // Canonical link via <link rel="canonical">
+        const canonicalEl = doc.querySelector('link[rel="canonical"]');
+        if (canonicalEl && canonicalEl.href) {
+          canonical = canonicalEl.href;
+        }
+        // Fallback to og:url meta tag
+        if (!canonical) {
+          const ogUrl = doc.querySelector('meta[property="og:url"]');
+          if (ogUrl && ogUrl.getAttribute('content')) {
+            canonical = ogUrl.getAttribute('content');
+          }
+        }
+        // Extract coordinates from JSON‑LD blocks
+        const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
+        for (const script of scripts) {
+          const jsonText = script.textContent || script.innerText || '';
+          try {
+            const json = JSON.parse(jsonText);
+            const objs = Array.isArray(json) ? json : [json];
+            for (const obj of objs) {
+              // Search for GeoCoordinates
+              if (obj['@type'] === 'GeoCoordinates' && typeof obj.latitude === 'number' && typeof obj.longitude === 'number') {
+                latitude = obj.latitude;
+                longitude = obj.longitude;
+              }
+              // Search for Place with geo
+              if (obj['@type'] === 'Place' && obj.geo && typeof obj.geo.latitude === 'number' && typeof obj.geo.longitude === 'number') {
+                latitude = obj.geo.latitude;
+                longitude = obj.geo.longitude;
+              }
+              // Some ArchDaily JSON uses nested address
+              if (obj['@type'] === 'Place' && obj.address) {
+                // If it contains latitude/longitude keys
+                if (typeof obj.address.latitude === 'number' && typeof obj.address.longitude === 'number') {
+                  latitude = obj.address.latitude;
+                  longitude = obj.address.longitude;
+                }
+              }
+            }
+          } catch (jsonErr) {
+            // Ignore JSON parse errors
+          }
+          // Break early if coordinates found
+          if (latitude !== null && longitude !== null) {
+            break;
+          }
+        }
+      } catch (err) {
+        console.warn('Error scraping', link, err);
+      }
+      return { canonical: canonical, lat: latitude, lng: longitude };
+    }
+
+    /**
      * Perform a search against a Google Programmable Search Engine and plot the
      * resulting articles on the map. Each result is geocoded using the
      * article title; duplicate titles are ignored. Markers created by this
@@ -209,23 +332,21 @@ h1 {
           }
           seen.add(fingerprint);
           const snippet = item.snippet || '';
-          // Determine the most accurate link to the article. Some results
-          // provide a generic landing page (e.g. /projects) instead of the
-          // specific project URL. Attempt to extract a canonical URL from
-          // the PSE metadata; fall back to the provided link when none
-          // exists.
-          let link = item.link || '';
+          // Extract a representative image from the PSE metadata if available.
+          let imageUrl = null;
           try {
-            if (item.pagemap && Array.isArray(item.pagemap.metatags) && item.pagemap.metatags.length > 0) {
-              const meta = item.pagemap.metatags[0] || {};
-              const canonicalCandidate = meta['og:url'] || meta['twitter:url'] || meta['citation_url'];
-              if (typeof canonicalCandidate === 'string' && canonicalCandidate.trim()) {
-                link = canonicalCandidate;
-              }
+            const pm = item.pagemap || {};
+            if (pm.cse_image && Array.isArray(pm.cse_image) && pm.cse_image.length > 0) {
+              imageUrl = pm.cse_image[0].src || null;
+            } else if (pm.cse_thumbnail && Array.isArray(pm.cse_thumbnail) && pm.cse_thumbnail.length > 0) {
+              imageUrl = pm.cse_thumbnail[0].src || null;
             }
-          } catch (metaErr) {
-            // If extraction fails, retain original link
+          } catch (imgErr) {
+            // Ignore image extraction errors
           }
+          // Attempt to scrape canonical URL and JSON‑LD coordinates.
+          const extraData = await getCanonicalAndLatLng(item);
+          let link = extraData.canonical || item.link || '';
           // Derive the domain from the link if available; fallback to displayLink
           let site = '';
           try {
@@ -238,45 +359,58 @@ h1 {
           } catch (err) {
             site = item.displayLink || '';
           }
-          // Geocode the article title. Using the Maps API key defined globally.
-          const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(title)}&key=${apiKey}`;
-          try {
-            const gResp = await fetch(geocodeUrl);
-            if (!gResp.ok) {
-              console.warn('Geocode request failed for', title);
+          // Determine location: prefer coordinates scraped from JSON‑LD, otherwise
+          // geocode the title alone.
+          let location = null;
+          if (extraData.lat !== null && extraData.lng !== null) {
+            location = { lat: extraData.lat, lng: extraData.lng };
+          } else {
+            const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(title)}&key=${apiKey}`;
+            try {
+              const gResp = await fetch(geocodeUrl);
+              if (!gResp.ok) {
+                console.warn('Geocode request failed for', title);
+                continue;
+              }
+              const gData = await gResp.json();
+              if (gData.status !== 'OK' || !gData.results || gData.results.length === 0) {
+                console.warn('No geocode results for', title);
+                continue;
+              }
+              location = gData.results[0].geometry.location;
+            } catch (geErr) {
+              console.warn('Geocoding error for', title, geErr);
               continue;
             }
-            const gData = await gResp.json();
-            if (gData.status !== 'OK' || !gData.results || gData.results.length === 0) {
-              console.warn('No geocode results for', title);
-              continue;
-            }
-            const location = gData.results[0].geometry.location;
-            const marker = new google.maps.Marker({
-              position: { lat: location.lat, lng: location.lng },
-              map: map,
-              title: title
-            });
-            markers.push(marker);
-            // Build info window content for this marker
-            let content = `<div class="info-window"><h3>${title}</h3>`;
-            if (site) {
-              content += `<p><strong>Site:</strong> ${site}</p>`;
-            }
-            if (snippet) {
-              content += `<p>${snippet}</p>`;
-            }
-            if (link) {
-              content += `<p><a href="${link}" target="_blank" rel="noopener">Read article</a></p>`;
-            }
-            content += '</div>';
-            const infoWindow = new google.maps.InfoWindow({ content: content });
-            marker.addListener('click', () => {
-              infoWindow.open(map, marker);
-            });
-          } catch (geErr) {
-            console.warn('Geocoding error for', title, geErr);
           }
+          if (!location) {
+            continue;
+          }
+          const marker = new google.maps.Marker({
+            position: { lat: location.lat, lng: location.lng },
+            map: map,
+            title: title
+          });
+          markers.push(marker);
+          // Build info window content for this marker
+          let content = `<div class="info-window"><h3>${title}</h3>`;
+          if (site) {
+            content += `<p><strong>Site:</strong> ${site}</p>`;
+          }
+          if (snippet) {
+            content += `<p>${snippet}</p>`;
+          }
+          if (imageUrl) {
+            content += `<p><img src="${imageUrl}" alt="" style="max-width:100%;height:auto;border-radius:4px;" /></p>`;
+          }
+          if (link) {
+            content += `<p><a href="${link}" target="_blank" rel="noopener">Read article</a></p>`;
+          }
+          content += '</div>';
+          const infoWindow = new google.maps.InfoWindow({ content: content });
+          marker.addListener('click', () => {
+            infoWindow.open(map, marker);
+          });
         }
       } catch (err) {
         console.error('PSE search error:', err);
@@ -628,23 +762,26 @@ h1 {
         }
         seen.add(fingerprint);
         const snippet = item.snippet || '';
-        // Determine the most accurate link to the article. Some PSE items
-        // return a generic landing page (e.g. /projects) even though the
-        // snippet references a specific project. Attempt to extract a
-        // canonical URL from the PSE metadata to correct this. If none
-        // exists, fall back to the provided link.
-        let link = item.link || '';
+        // Extract a representative image from the PSE metadata if available.
+        let imageUrl = null;
         try {
-          if (item.pagemap && Array.isArray(item.pagemap.metatags) && item.pagemap.metatags.length > 0) {
-            const meta = item.pagemap.metatags[0] || {};
-            const canonicalCandidate = meta['og:url'] || meta['twitter:url'] || meta['citation_url'];
-            if (typeof canonicalCandidate === 'string' && canonicalCandidate.trim()) {
-              link = canonicalCandidate;
-            }
+          const pm = item.pagemap || {};
+          if (pm.cse_image && Array.isArray(pm.cse_image) && pm.cse_image.length > 0) {
+            imageUrl = pm.cse_image[0].src || null;
+          } else if (pm.cse_thumbnail && Array.isArray(pm.cse_thumbnail) && pm.cse_thumbnail.length > 0) {
+            imageUrl = pm.cse_thumbnail[0].src || null;
           }
-        } catch (err) {
-          // Ignore metadata extraction errors and use the original link
+        } catch (imgErr) {
+          // Ignore image extraction errors
         }
+        // Retrieve canonical URL and JSON‑LD coordinates. This helper may use
+        // a CORS proxy to bypass cross‑origin restrictions. It also
+        // opportunistically extracts a canonical URL from the PSE metadata
+        // before fetching the page. If the canonical or coordinates are
+        // unavailable, the fields will be null.
+        const extraData = await getCanonicalAndLatLng(item);
+        let link = extraData.canonical || item.link || '';
+        // Determine the site/domain from the link or fallback displayLink
         let site = '';
         try {
           if (link) {
@@ -656,31 +793,39 @@ h1 {
         } catch (err) {
           site = item.displayLink || '';
         }
-        // Try multiple geocoding queries (city, country, then title alone) to improve matches.
-        const geocodeQueries = [];
-        if (city) {
-          geocodeQueries.push(`${title} ${city}`);
-        }
-        if (country && country !== city) {
-          geocodeQueries.push(`${title} ${country}`);
-        }
-        geocodeQueries.push(title);
+        // Determine coordinates: prefer JSON‑LD from extraData; otherwise
+        // attempt to geocode the title combined with city/country. This
+        // fallback uses the Google Geocoding API via the apiKey. It
+        // constructs multiple queries ordered from most specific (title
+        // + city) to least (title alone).
         let foundLocation = null;
-        for (const queryStr of geocodeQueries) {
-          const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(queryStr)}&key=${apiKey}`;
-          try {
-            const gResp = await fetch(geocodeUrl);
-            if (!gResp.ok) {
-              console.warn('Geocode request failed for', title, 'with query', queryStr);
-              continue;
+        if (extraData.lat !== null && extraData.lng !== null) {
+          foundLocation = { lat: extraData.lat, lng: extraData.lng };
+        } else {
+          const geocodeQueries = [];
+          if (city) {
+            geocodeQueries.push(`${title} ${city}`);
+          }
+          if (country && country !== city) {
+            geocodeQueries.push(`${title} ${country}`);
+          }
+          geocodeQueries.push(title);
+          for (const queryStr of geocodeQueries) {
+            const geocodeUrl = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(queryStr)}&key=${apiKey}`;
+            try {
+              const gResp = await fetch(geocodeUrl);
+              if (!gResp.ok) {
+                console.warn('Geocode request failed for', title, 'with query', queryStr);
+                continue;
+              }
+              const gData = await gResp.json();
+              if (gData.status === 'OK' && gData.results && gData.results.length > 0) {
+                foundLocation = gData.results[0].geometry.location;
+                break;
+              }
+            } catch (err) {
+              console.warn('Geocode error for', title, 'with query', queryStr, ':', err);
             }
-            const gData = await gResp.json();
-            if (gData.status === 'OK' && gData.results && gData.results.length > 0) {
-              foundLocation = gData.results[0].geometry.location;
-              break;
-            }
-          } catch (err) {
-            console.warn('Geocode error for', title, 'with query', queryStr, ':', err);
           }
         }
         if (!foundLocation) {
@@ -705,6 +850,10 @@ h1 {
         }
         if (snippet) {
           content += `<p>${snippet}</p>`;
+        }
+        if (imageUrl) {
+          // Constrain image width in the info window; height auto maintains aspect ratio
+          content += `<p><img src="${imageUrl}" alt="" style="max-width:100%;height:auto;border-radius:4px;" /></p>`;
         }
         if (link) {
           content += `<p><a href="${link}" target="_blank" rel="noopener">Read article</a></p>`;
